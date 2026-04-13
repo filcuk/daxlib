@@ -1,443 +1,516 @@
-/// Converts Markdown to HTML (CommonMark 0.31.2 core).
-/// Supported (pragmatic subset): fenced code blocks (```), ATX headings (#..######),
-/// unordered lists (-, *, +), paragraphs, blank-line separation, and basic inline
-/// formatting: code spans (`code`), strong (**bold**), emphasis (*italic*).
-///
-/// Notes / limitations:
-/// - This is not a complete CommonMark implementation (no blockquotes, tables, setext headings,
-///   tight/loose list nuance, link reference definitions, nested lists, thematic breaks, etc.).
-/// - Inline parsing is intentionally simple and may not match all edge cases from the spec.
-/// - Partial link paths are not supported ([link](/res/img.png))
-function 'Fi.Convert.MDtoHTML' = ```
-		(
-		    // Markdown input
-		    markdown: STRING
-		) =>
-		VAR LF = UNICHAR( 10 )
-		VAR CR = UNICHAR( 13 )
-		VAR __Text0 =
-		    // Normalize line breaks to LF
-		    SUBSTITUTE( SUBSTITUTE( markdown, CR & LF, LF ), CR, LF )
+/// Markdown to HTML conversion
+/// Supports core Markdown features
 
-		// Pragmatic: flatten blockquote-wrapped lines (`> `) since blockquotes
-		// are not fully implemented; this also allows inline constructs (like links)
-		// to span across wrapped `> ` lines.
-		VAR __Text1 = SUBSTITUTE( __Text0, LF & "> ", " " )
-
-		// Split into lines using PATH* (| delimiter)
-		VAR __Path = SUBSTITUTE( __Text1, LF, "|" )
-		VAR __LineCount =
-		    VAR n = PATHLENGTH( __Path )
-		    RETURN IF( __Text1 = BLANK(), 0, n )
-
-		VAR __Lines =
-		    ADDCOLUMNS(
-		        GENERATESERIES( 1, __LineCount, 1 ),
-		        "LineRaw",
-		            VAR __L0 = PATHITEM( __Path, [Value], TEXT )
-		            VAR __T = TRIM( __L0 )
-		            RETURN IF( LEFT( __T, 2 ) = "> ", MID( __T, 3, LEN( __T ) - 2 ), __L0 )
-		    )
-
-		VAR __Lines2 =
-		    ADDCOLUMNS(
-		        __Lines,
-		        "LineTrim", TRIM( [LineRaw] ),
-		        "IsBlank", LEN( TRIM( [LineRaw] ) ) = 0,
-		        "IsFence", LEFT( TRIM( [LineRaw] ), 3 ) = "```",
-		        "IsUL",
-		            VAR t = TRIM( [LineRaw] )
-		            RETURN
-		                ( LEFT( t, 2 ) = "- " )
-		                    || ( LEFT( t, 2 ) = "* " )
-		                    || ( LEFT( t, 2 ) = "+ " ),
-		        "HeadingLevel",
-		            VAR t = [LineRaw]
-		            RETURN
-		                SWITCH(
-		                    TRUE(),
-		                    LEFT( t, 7 ) = "###### ", 6,
-		                    LEFT( t, 6 ) = "##### ",  5,
-		                    LEFT( t, 5 ) = "#### ",   4,
-		                    LEFT( t, 4 ) = "### ",    3,
-		                    LEFT( t, 3 ) = "## ",     2,
-		                    LEFT( t, 2 ) = "# ",      1,
-		                    0
-		                ),
-		        "FenceCountBefore",
-		            VAR i = [Value]
-		            RETURN
-		                SUMX(
-		                    FILTER( __Lines, [Value] < i ),
-		                    VAR t2 = TRIM( [LineRaw] )
-		                    RETURN IF( LEFT( t2, 3 ) = "```", 1, 0 )
-		                )
-		    )
-
-		VAR __Lines3 =
-		    ADDCOLUMNS(
-		        __Lines2,
-		        "InCodeBefore", MOD( [FenceCountBefore], 2 ) = 1,
-		        "IsFenceStart", ( MOD( [FenceCountBefore], 2 ) = 0 ) && [IsFence],
-		        "IsFenceEnd",   ( MOD( [FenceCountBefore], 2 ) = 1 ) && [IsFence]
-		    )
-
-		// Build HTML by rendering each line with boundary-aware wrappers.
-		VAR __Html =
-		    CONCATENATEX(
-		        __Lines3,
-		        VAR __I = [Value]
-		        VAR __LineRaw = [LineRaw]
-		        VAR __LineTrim = [LineTrim]
-
-		        VAR __PrevIsUL =
-		            VAR __P = __I - 1
-		            RETURN
-		                IF(
-		                    __P < 1,
-		                    FALSE(),
-		                    MAXX( FILTER( __Lines3, [Value] = __P ), IF( [IsUL], 1, 0 ) ) = 1
-		                )
-		        VAR __NextIsUL =
-		            VAR __N = __I + 1
-		            RETURN
-		                IF(
-		                    __N > __LineCount,
-		                    FALSE(),
-		                    MAXX( FILTER( __Lines3, [Value] = __N ), IF( [IsUL], 1, 0 ) ) = 1
-		                )
-
-		        VAR __PrevIsParaLine =
-		            VAR __P = __I - 1
-		            RETURN
-		                IF(
-		                    __P < 1,
-		                    FALSE(),
-		                    MAXX(
-		                        FILTER( __Lines3, [Value] = __P ),
-		                        IF(
-		                            NOT [IsBlank]
-		                                && NOT [IsUL]
-		                                && [HeadingLevel] = 0
-		                                && NOT [IsFence]
-		                                && NOT [InCodeBefore],
-		                            1,
-		                            0
-		                        )
-		                    )
-		                        = 1
-		                )
-		        VAR __NextIsParaLine =
-		            VAR __N = __I + 1
-		            RETURN
-		                IF(
-		                    __N > __LineCount,
-		                    FALSE(),
-		                    MAXX(
-		                        FILTER( __Lines3, [Value] = __N ),
-		                        IF(
-		                            NOT [IsBlank]
-		                                && NOT [IsUL]
-		                                && [HeadingLevel] = 0
-		                                && NOT [IsFence]
-		                                && NOT [InCodeBefore],
-		                            1,
-		                            0
-		                        )
-		                    )
-		                        = 1
-		                )
-
-		        // HTML escaping (basic)
-		        VAR __Pch = UNICHAR( 57344 )
-		        VAR __Esc0 =
-		            VAR __T1 = SUBSTITUTE( __LineRaw, "&", __Pch )
-		            VAR __T2 = SUBSTITUTE( __T1, "<", "&lt;" )
-		            VAR __T3 = SUBSTITUTE( __T2, ">", "&gt;" )
-		            VAR __T4 = SUBSTITUTE( __T3, """", "&quot;" )
-		            RETURN SUBSTITUTE( __T4, __Pch, "&amp;" )
-
-		        // Inline: code spans using backticks (simple, single-line)
-		        // PATH* only splits on '|', so we temporarily shield existing '|' characters.
-		        VAR __InlineCode =
-		            VAR __Shield = UNICHAR( 57345 )
-		            VAR __Safe = SUBSTITUTE( __Esc0, "|", __Shield )
-		            VAR __Pth = SUBSTITUTE( __Safe, "`", "|" )
-		            VAR __Parts = PATHLENGTH( __Pth )
-		            RETURN
-		                IF(
-		                    __Parts = 1,
-		                    __Esc0,
-		                    CONCATENATEX(
-		                        GENERATESERIES( 1, __Parts, 1 ),
-		                        VAR __K = [Value]
-		                        VAR __Seg0 = PATHITEM( __Pth, __K, TEXT )
-		                        VAR __Seg = SUBSTITUTE( __Seg0, __Shield, "|" )
-		                        RETURN IF( MOD( __K, 2 ) = 0, "<code>" & __Seg & "</code>", __Seg ),
-		                        "",
-		                        [Value],
-		                        ASC
-		                    )
-		                )
-
-		        // Inline: links [text](href) outside <code> spans (pragmatic)
-		        VAR __InlineLinks =
-		            VAR __PosCodeOpen = SEARCH( "<code>", __InlineCode, 1, 0 )
-		            RETURN
-		                IF(
-		                    __PosCodeOpen = 0,
-		                    // No code span: linkify whole line once
-		                    VAR __S = __InlineCode
-		                    VAR __PosOpen = SEARCH( "[", __S, 1, 0 )
-		                    VAR __PosMid = IF( __PosOpen = 0, 0, SEARCH( "](", __S, __PosOpen + 1, 0 ) )
-		                    VAR __PosClose = IF( __PosMid = 0, 0, SEARCH( ")", __S, __PosMid + 2, 0 ) )
-		                    RETURN
-		                        IF(
-		                            __PosOpen = 0 || __PosMid = 0 || __PosClose = 0,
-		                            __S,
-		                            VAR __Before = LEFT( __S, __PosOpen - 1 )
-		                            VAR __Txt = MID( __S, __PosOpen + 1, __PosMid - __PosOpen - 1 )
-		                            VAR __Href = MID( __S, __PosMid + 2, __PosClose - __PosMid - 2 )
-		                            VAR __After = MID( __S, __PosClose + 1, LEN( __S ) - __PosClose )
-		                            RETURN __Before & "<a href=""" & __Href & """>" & __Txt & "</a>" & __After
-		                        ),
-		                    // Has a code span: linkify before and after the first code span
-		                    VAR __Before0 = LEFT( __InlineCode, __PosCodeOpen - 1 )
-		                    VAR __Rest0 = MID( __InlineCode, __PosCodeOpen + 6, LEN( __InlineCode ) - ( __PosCodeOpen + 5 ) )
-		                    VAR __PosCodeClose = SEARCH( "</code>", __Rest0, 1, 0 )
-		                    RETURN
-		                        IF(
-		                            __PosCodeClose = 0,
-		                            VAR __S = __Before0
-		                            VAR __PosOpen = SEARCH( "[", __S, 1, 0 )
-		                            VAR __PosMid = IF( __PosOpen = 0, 0, SEARCH( "](", __S, __PosOpen + 1, 0 ) )
-		                            VAR __PosClose = IF( __PosMid = 0, 0, SEARCH( ")", __S, __PosMid + 2, 0 ) )
-		                            VAR __Before1 =
-		                                IF(
-		                                    __PosOpen = 0 || __PosMid = 0 || __PosClose = 0,
-		                                    __S,
-		                                    VAR __Before = LEFT( __S, __PosOpen - 1 )
-		                                    VAR __Txt = MID( __S, __PosOpen + 1, __PosMid - __PosOpen - 1 )
-		                                    VAR __Href = MID( __S, __PosMid + 2, __PosClose - __PosMid - 2 )
-		                                    VAR __After = MID( __S, __PosClose + 1, LEN( __S ) - __PosClose )
-		                                    RETURN __Before & "<a href=""" & __Href & """>" & __Txt & "</a>" & __After
-		                                )
-		                            RETURN __Before1 & "<code>" & __Rest0,
-		                            VAR __CodeInside = LEFT( __Rest0, __PosCodeClose - 1 )
-		                            VAR __After0 = MID( __Rest0, __PosCodeClose + 7, LEN( __Rest0 ) - ( __PosCodeClose + 6 ) )
-		                            VAR __S = __Before0
-		                            VAR __PosOpen = SEARCH( "[", __S, 1, 0 )
-		                            VAR __PosMid = IF( __PosOpen = 0, 0, SEARCH( "](", __S, __PosOpen + 1, 0 ) )
-		                            VAR __PosClose = IF( __PosMid = 0, 0, SEARCH( ")", __S, __PosMid + 2, 0 ) )
-		                            VAR __Before1 =
-		                                IF(
-		                                    __PosOpen = 0 || __PosMid = 0 || __PosClose = 0,
-		                                    __S,
-		                                    VAR __Before = LEFT( __S, __PosOpen - 1 )
-		                                    VAR __Txt = MID( __S, __PosOpen + 1, __PosMid - __PosOpen - 1 )
-		                                    VAR __Href = MID( __S, __PosMid + 2, __PosClose - __PosMid - 2 )
-		                                    VAR __After = MID( __S, __PosClose + 1, LEN( __S ) - __PosClose )
-		                                    RETURN __Before & "<a href=""" & __Href & """>" & __Txt & "</a>" & __After
-		                                )
-		                            VAR __S2 = __After0
-		                            VAR __PosOpen2 = SEARCH( "[", __S2, 1, 0 )
-		                            VAR __PosMid2 = IF( __PosOpen2 = 0, 0, SEARCH( "](", __S2, __PosOpen2 + 1, 0 ) )
-		                            VAR __PosClose2 = IF( __PosMid2 = 0, 0, SEARCH( ")", __S2, __PosMid2 + 2, 0 ) )
-		                            VAR __After1 =
-		                                IF(
-		                                    __PosOpen2 = 0 || __PosMid2 = 0 || __PosClose2 = 0,
-		                                    __S2,
-		                                    VAR __Before = LEFT( __S2, __PosOpen2 - 1 )
-		                                    VAR __Txt = MID( __S2, __PosOpen2 + 1, __PosMid2 - __PosOpen2 - 1 )
-		                                    VAR __Href = MID( __S2, __PosMid2 + 2, __PosClose2 - __PosMid2 - 2 )
-		                                    VAR __After = MID( __S2, __PosClose2 + 1, LEN( __S2 ) - __PosClose2 )
-		                                    RETURN __Before & "<a href=""" & __Href & """>" & __Txt & "</a>" & __After
-		                                )
-		                            RETURN __Before1 & "<code>" & __CodeInside & "</code>" & __After1
-		                        )
-		                )
-
-		        // Inline: strong (** .. **) and emphasis (* .. *) outside code blocks (simple toggles)
-		        VAR __InlineStrong =
-		            VAR __Shield = UNICHAR( 57345 )
-		            VAR __Safe = SUBSTITUTE( __InlineLinks, "|", __Shield )
-		            VAR __Pth = SUBSTITUTE( __Safe, "**", "|" )
-		            VAR __Parts = PATHLENGTH( __Pth )
-		            VAR __Ok = MOD( __Parts - 1, 2 ) = 0
-		            RETURN
-		                IF(
-		                    NOT __Ok,
-		                    __InlineLinks,
-		                    CONCATENATEX(
-		                        GENERATESERIES( 1, __Parts, 1 ),
-		                        VAR __K = [Value]
-		                        VAR __Seg0 = PATHITEM( __Pth, __K, TEXT )
-		                        VAR __Seg = SUBSTITUTE( __Seg0, __Shield, "|" )
-		                        RETURN IF( MOD( __K, 2 ) = 0, "<strong>" & __Seg & "</strong>", __Seg ),
-		                        "",
-		                        [Value],
-		                        ASC
-		                    )
-		                )
-
-		        VAR __InlineEm =
-		            VAR __Shield = UNICHAR( 57345 )
-		            VAR __Safe = SUBSTITUTE( __InlineStrong, "|", __Shield )
-		            VAR __Pth = SUBSTITUTE( __Safe, "*", "|" )
-		            VAR __Parts = PATHLENGTH( __Pth )
-		            VAR __Ok = MOD( __Parts - 1, 2 ) = 0
-		            RETURN
-		                IF(
-		                    NOT __Ok,
-		                    __InlineStrong,
-		                    CONCATENATEX(
-		                        GENERATESERIES( 1, __Parts, 1 ),
-		                        VAR __K = [Value]
-		                        VAR __Seg0 = PATHITEM( __Pth, __K, TEXT )
-		                        VAR __Seg = SUBSTITUTE( __Seg0, __Shield, "|" )
-		                        RETURN IF( MOD( __K, 2 ) = 0, "<em>" & __Seg & "</em>", __Seg ),
-		                        "",
-		                        [Value],
-		                        ASC
-		                    )
-		                )
-
-		        VAR __RenderedInline = __InlineEm
-
-		        VAR __OpenUL = IF( [IsUL] && NOT __PrevIsUL && NOT [InCodeBefore], "<ul>" & LF, "" )
-		        VAR __CloseUL = IF( [IsUL] && NOT __NextIsUL && NOT [InCodeBefore], LF & "</ul>" & LF, "" )
-
-		        VAR __OpenP =
-		            IF(
-		                NOT [InCodeBefore]
-		                    && NOT [IsFence]
-		                    && NOT [IsBlank]
-		                    && NOT [IsUL]
-		                    && [HeadingLevel] = 0
-		                    && NOT __PrevIsParaLine,
-		                "<p>",
-		                ""
-		            )
-		        VAR __CloseP =
-		            IF(
-		                NOT [InCodeBefore]
-		                    && NOT [IsFence]
-		                    && NOT [IsBlank]
-		                    && NOT [IsUL]
-		                    && [HeadingLevel] = 0
-		                    && NOT __NextIsParaLine,
-		                "</p>" & LF,
-		                ""
-		            )
-
-		        VAR __Li =
-		            IF(
-		                [IsUL] && NOT [InCodeBefore],
-		                VAR __T = __LineTrim
-		                VAR __Content = MID( __T, 3, LEN( __T ) - 2 )
-		                RETURN "<li>" & __Content & "</li>",
-		                BLANK()
-		            )
-
-		        VAR __Heading =
-		            IF(
-		                NOT [InCodeBefore] && [HeadingLevel] > 0,
-		                VAR __Lvl = [HeadingLevel]
-		                VAR __Content = MID( __LineRaw, __Lvl + 2, LEN( __LineRaw ) - ( __Lvl + 1 ) )
-		                VAR __Slug0 = LOWER( TRIM( __Content ) )
-		                VAR __Slug1 =
-		                    SUBSTITUTE(
-		                        SUBSTITUTE(
-		                            SUBSTITUTE(
-		                                SUBSTITUTE(
-		                                    SUBSTITUTE(
-		                                        SUBSTITUTE(
-		                                            SUBSTITUTE(
-		                                                SUBSTITUTE(
-		                                                    SUBSTITUTE(
-		                                                        SUBSTITUTE(
-		                                                            SUBSTITUTE(
-		                                                                SUBSTITUTE( __Slug0, ".", "" ),
-		                                                                ",", ""
-		                                                            ),
-		                                                            ":", ""
-		                                                        ),
-		                                                        ";", ""
-		                                                    ),
-		                                                    "!", ""
-		                                                ),
-		                                                "?", ""
-		                                            ),
-		                                            """", ""
-		                                        ),
-		                                        "'", ""
-		                                    ),
-		                                    "(", ""
-		                                ),
-		                                ")", ""
-		                            ),
-		                            "[", ""
-		                        ),
-		                        "]", ""
-		                    )
-		                VAR __Slug2 = SUBSTITUTE( __Slug1, " ", "-" )
-		                VAR __Slug3 =
-		                    SUBSTITUTE(
-		                        SUBSTITUTE(
-		                            SUBSTITUTE(
-		                                SUBSTITUTE( __Slug2, "--", "-" ),
-		                                "--", "-"
-		                            ),
-		                            "--", "-"
-		                        ),
-		                        "--", "-"
-		                    )
-		                VAR __Slug = __Slug3
-		                RETURN "<h" & __Lvl & " id=""" & __Slug & """>" & __Content & "</h" & __Lvl & ">" & LF,
-		                BLANK()
-		            )
-
-		        VAR __CodeFence =
-		            IF(
-		                [IsFenceStart],
-		                "<pre><code>" & LF,
-		                IF( [IsFenceEnd], "</code></pre>" & LF, BLANK() )
-		            )
-
-		        VAR __CodeLine =
-		            IF(
-		                [InCodeBefore] && NOT [IsFence],
-		                __Esc0 & LF,
-		                BLANK()
-		            )
-
-		        VAR __ParaLine =
-		            IF(
-		                NOT [InCodeBefore]
-		                    && NOT [IsFence]
-		                    && NOT [IsBlank]
-		                    && NOT [IsUL]
-		                    && [HeadingLevel] = 0,
-		                __OpenP & __RenderedInline & __CloseP,
-		                BLANK()
-		            )
-
-		        RETURN
-		            COALESCE( __OpenUL, "" )
-		                & COALESCE( __CodeFence, "" )
-		                & COALESCE( __CodeLine, "" )
-		                & COALESCE( __Heading, "" )
-		                & COALESCE( __Li, "" )
-		                & COALESCE( __ParaLine, "" )
-		                & COALESCE( __CloseUL, "" ),
+function 'Fi.Convert.MDtoHTML' =
+		( md : STRING ) =>
+		    IF (
+		        ISBLANK ( md ) || md = "",
 		        "",
-		        [Value],
-		        ASC
+		        VAR __EscPipe = UNICHAR ( 9834 )
+		        VAR __norm =
+		            SUBSTITUTE ( SUBSTITUTE ( SUBSTITUTE ( md, UNICHAR ( 13 ) & UNICHAR ( 10 ), UNICHAR ( 10 ) ), UNICHAR ( 13 ), UNICHAR ( 10 ) ), UNICHAR ( 160 ), " " )
+		        VAR __pathStr = SUBSTITUTE ( SUBSTITUTE ( __norm, "|", __EscPipe ), UNICHAR ( 10 ), "|" )
+		        VAR __lineCount = PATHLENGTH ( __pathStr )
+		        VAR __LinesAgg =
+		            ADDCOLUMNS (
+		                GENERATESERIES ( 1, __lineCount, 1 ),
+		                "Raw", PATHITEM ( __pathStr, [Value], TEXT ),
+		                "Idx", [Value],
+		                "LT",
+		                    VAR __sLt = PATHITEM ( __pathStr, [Value], TEXT )
+		                    RETURN
+		                        IF (
+		                            OR ( ISBLANK ( __sLt ), __sLt = "" ),
+		                            "",
+		                            VAR __lenLt = LEN ( __sLt )
+		                            VAR __iLt =
+		                                MINX (
+		                                    FILTER (
+		                                        ADDCOLUMNS (
+		                                            GENERATESERIES ( 1, __lenLt, 1 ),
+		                                            "Ch", MID ( __sLt, [Value], 1 )
+		                                        ),
+		                                        [Ch] <> " " && [Ch] <> UNICHAR ( 9 )
+		                                    ),
+		                                    [Value]
+		                                )
+		                            VAR __remLt = __lenLt - __iLt + 1
+		                            RETURN IF ( OR ( ISBLANK ( __iLt ), __remLt <= 0 ), "", MID ( __sLt, __iLt, __remLt ) )
+		                        )
+		            )
+		        VAR __MdWithEmpty =
+		            ADDCOLUMNS ( __LinesAgg, "IsEmpty", TRIM ( [Raw] ) = "" )
+		        VAR __MdWithSep =
+		            ADDCOLUMNS (
+		                __MdWithEmpty,
+		                "SepBefore",
+		                    VAR __iSep = [Idx]
+		                    RETURN SUMX ( FILTER ( __MdWithEmpty, [Idx] < __iSep ), IF ( [IsEmpty], 1, 0 ) )
+		            )
+		        VAR __MdWithKind =
+		            ADDCOLUMNS (
+		                __MdWithSep,
+		                "Kind",
+		                    SWITCH (
+		                        TRUE (),
+		                        [IsEmpty], "E",
+		                        VAR __lt = [LT]
+		                        VAR __sp = SEARCH ( " ", __lt & " ", 1, BLANK () )
+		                        VAR __hashRun = LEFT ( __lt, __sp - 1 )
+		                        VAR __isHeading =
+		                            __sp > 1
+		                                && __sp <= 8
+		                                && LEN ( __hashRun ) >= 1
+		                                && LEN ( __hashRun ) <= 6
+		                                && LEN ( SUBSTITUTE ( __hashRun, "#", "" ) ) = 0
+		                                && MID ( __lt, __sp, 1 ) = " "
+		                        RETURN
+		                            IF (
+		                                __isHeading,
+		                                "H",
+		                                VAR __tr =
+		                                    SUBSTITUTE ( SUBSTITUTE ( SUBSTITUTE ( __lt, " ", "" ), UNICHAR ( 9 ), "" ), UNICHAR ( 160 ), "" )
+		                                VAR __isHr =
+		                                    LEN ( __tr ) >= 3
+		                                        && LEFT ( __tr, 1 ) = "-"
+		                                        && LEN ( SUBSTITUTE ( __tr, "-", "" ) ) = 0
+		                                RETURN
+		                                    IF (
+		                                        __isHr,
+		                                        "R",
+		                                        VAR __isUl =
+		                                            ( LEN ( __lt ) >= 2 && LEFT ( __lt, 2 ) = "- " )
+		                                                || ( LEN ( __lt ) >= 2 && LEFT ( __lt, 2 ) = "* " )
+		                                                || ( LEN ( __lt ) >= 2 && LEFT ( __lt, 2 ) = "+ " )
+		                                        RETURN IF ( __isUl, "U", "P" )
+		                                    )
+		                            )
+		                    )
+		            )
+		        VAR __PlainLines = FILTER ( __MdWithKind, [Kind] = "P" && NOT [IsEmpty] )
+		        VAR __ParaFirstIdx =
+		            ADDCOLUMNS (
+		                SUMMARIZE ( __PlainLines, [SepBefore] ),
+		                "FirstIdx",
+		                    VAR __sepG = [SepBefore]
+		                    RETURN MINX ( FILTER ( __PlainLines, [SepBefore] = __sepG ), [Idx] )
+		            )
+		        VAR __MdWithParaHtml =
+		            ADDCOLUMNS (
+		                __MdWithKind,
+		                "ParaHtml",
+		                    IF (
+		                        NOT ( [Kind] = "P" && NOT [IsEmpty] ),
+		                        BLANK (),
+		                        VAR __sb = [SepBefore]
+		                        VAR __fIdx = MINX ( FILTER ( __ParaFirstIdx, [SepBefore] = __sb ), [FirstIdx] )
+		                        RETURN
+		                            IF (
+		                                [Idx] <> __fIdx,
+		                                BLANK (),
+		                                VAR __linesInPara = FILTER ( __PlainLines, [SepBefore] = __sb )
+		                                RETURN
+		                                    CONCATENATEX (
+		                                        __linesInPara,
+		                                        VAR __r = [Raw]
+		                                        VAR __ix = [Idx]
+		                                        VAR __pIx = MAXX ( FILTER ( __linesInPara, [Idx] < __ix ), [Idx] )
+		                                        VAR __pfx =
+		                                            IF (
+		                                                ISBLANK ( __pIx ),
+		                                                "",
+		                                                VAR __pr = MAXX ( FILTER ( __linesInPara, [Idx] = __pIx ), [Raw] )
+		                                                VAR __sf =
+		                                                    LEN ( __pr ) >= 2 && MID ( __pr, LEN ( __pr ) - 1, 2 ) = "  "
+		                                                RETURN IF ( __sf, "<br>", " " )
+		                                            )
+		                                        VAR __disp =
+		                                            IF (
+		                                                LEN ( __r ) >= 2 && MID ( __r, LEN ( __r ) - 1, 2 ) = "  ",
+		                                                IF ( LEN ( __r ) = 2, "", LEFT ( __r, LEN ( __r ) - 2 ) ),
+		                                                __r
+		                                            )
+		                                        RETURN __pfx & __disp,
+		                                        "",
+		                                        [Idx],
+		                                        ASC
+		                                    )
+		                            )
+		                    )
+		            )
+		        VAR __MdWithDepth =
+		            ADDCOLUMNS (
+		                __MdWithParaHtml,
+		                "ListDepth",
+		                    IF (
+		                        [Kind] = "U",
+		                        VAR __pfxW = MAX ( 0, LEN ( [Raw] ) - LEN ( [LT] ) )
+		                        VAR __pfx = IF ( __pfxW <= 0, "", LEFT ( [Raw], __pfxW ) )
+		                        VAR __pfxLen = LEN ( __pfx )
+		                        RETURN
+		                            IF (
+		                                __pfxLen <= 0,
+		                                0,
+		                                QUOTIENT (
+		                                    SUMX (
+		                                        GENERATESERIES ( 1, __pfxLen, 1 ),
+		                                        VAR __ch = MID ( __pfx, [Value], 1 )
+		                                        RETURN IF ( __ch = UNICHAR ( 9 ), 4, IF ( __ch = " ", 1, 0 ) )
+		                                    ),
+		                                    4
+		                                )
+		                            ),
+		                        BLANK ()
+		                    )
+		            )
+		        VAR __Html =
+		            CONCATENATEX (
+		                __MdWithDepth,
+		                VAR __sepOut = [SepBefore]
+		                VAR __first = MINX ( FILTER ( __ParaFirstIdx, [SepBefore] = __sepOut ), [FirstIdx] )
+		                VAR __LtR = IF ( ISBLANK ( [LT] ), "", [LT] )
+		                VAR __lenR = LEN ( __LtR )
+		                VAR __sph = SEARCH ( " ", __LtR & " ", 1, BLANK () )
+		                VAR __src =
+		                    SWITCH (
+		                        TRUE (),
+		                        [Kind] = "H",
+		                            TRIM (
+		                                IF ( __lenR <= __sph, "", MID ( __LtR, __sph + 1, __lenR - __sph ) )
+		                            ),
+		                        [Kind] = "U",
+		                            TRIM ( IF ( __lenR < 3, "", MID ( __LtR, 3, __lenR - 2 ) ) ),
+		                        [Kind] = "P" && NOT [IsEmpty] && [Idx] = __first, [ParaHtml],
+		                        BLANK ()
+		                    )
+		                VAR __run = NOT ( ISBLANK ( __src ) )
+		                VAR __u0 = __src
+		                VAR __v1 =
+		                    IF (
+		                        NOT __run,
+		                        __u0,
+		                        VAR __pl = SEARCH ( "[", __u0, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __pl ),
+		                                __u0,
+		                                IF (
+		                                    __pl > 1 && MID ( __u0, __pl - 1, 1 ) = "!",
+		                                    __u0,
+		                                    VAR __ml = SEARCH ( "](", __u0, __pl + 1, BLANK () )
+		                                    RETURN
+		                                        IF (
+		                                            ISBLANK ( __ml ),
+		                                    __u0,
+		                                            VAR __el = SEARCH ( ")", __u0, __ml + 2, BLANK () )
+		                                            RETURN
+		                                                IF (
+		                                                    ISBLANK ( __el ),
+		                                            __u0,
+		                                                    IF ( __pl <= 1, "", LEFT ( __u0, __pl - 1 ) )
+		                                                        & "<a href="""
+		                                                        & IF ( __el - __ml - 2 <= 0, "", MID ( __u0, __ml + 2, __el - __ml - 2 ) )
+		                                                        & """>"
+		                                                        & IF ( __ml - __pl - 1 <= 0, "", MID ( __u0, __pl + 1, __ml - __pl - 1 ) )
+		                                                        & "</a>"
+		                                                        & IF ( LEN ( __u0 ) <= __el, "", MID ( __u0, __el + 1, LEN ( __u0 ) - __el ) )
+		                                                )
+		                                        )
+		                                )
+		                            )
+		                    )
+		                VAR __v2 =
+		                    IF (
+		                        NOT __run,
+		                        __v1,
+		                        VAR __pl2 = SEARCH ( "[", __v1, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __pl2 ),
+		                                __v1,
+		                                IF (
+		                                    __pl2 > 1 && MID ( __v1, __pl2 - 1, 1 ) = "!",
+		                                    __v1,
+		                                    VAR __ml2 = SEARCH ( "](", __v1, __pl2 + 1, BLANK () )
+		                                    RETURN
+		                                        IF (
+		                                            ISBLANK ( __ml2 ),
+		                                    __v1,
+		                                            VAR __el2 = SEARCH ( ")", __v1, __ml2 + 2, BLANK () )
+		                                            RETURN
+		                                                IF (
+		                                                    ISBLANK ( __el2 ),
+		                                            __v1,
+		                                                    IF ( __pl2 <= 1, "", LEFT ( __v1, __pl2 - 1 ) )
+		                                                        & "<a href="""
+		                                                        & IF ( __el2 - __ml2 - 2 <= 0, "", MID ( __v1, __ml2 + 2, __el2 - __ml2 - 2 ) )
+		                                                        & """>"
+		                                                        & IF ( __ml2 - __pl2 - 1 <= 0, "", MID ( __v1, __pl2 + 1, __ml2 - __pl2 - 1 ) )
+		                                                        & "</a>"
+		                                                        & IF ( LEN ( __v1 ) <= __el2, "", MID ( __v1, __el2 + 1, LEN ( __v1 ) - __el2 ) )
+		                                                )
+		                                        )
+		                                )
+		                            )
+		                    )
+		                VAR __x1 =
+		                    IF (
+		                        NOT __run,
+		                        __v2,
+		                        VAR __p = FIND ( "**", __v2, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __p ),
+		                                __v2,
+		                                VAR __q = FIND ( "**", __v2, __p + 2, BLANK () )
+		                                RETURN
+		                                    IF (
+		                                        ISBLANK ( __q ),
+		                                __v2,
+		                                        IF ( __p <= 1, "", LEFT ( __v2, __p - 1 ) )
+		                                            & "<strong>"
+		                                            & IF ( __q - __p - 2 <= 0, "", MID ( __v2, __p + 2, __q - __p - 2 ) )
+		                                            & "</strong>"
+		                                            & IF ( LEN ( __v2 ) <= __q + 1, "", MID ( __v2, __q + 2, LEN ( __v2 ) - __q - 1 ) )
+		                                    )
+		                            )
+		                    )
+		                VAR __x2 =
+		                    IF (
+		                        NOT __run,
+		                        __x1,
+		                        VAR __p2 = FIND ( "**", __x1, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __p2 ),
+		                                __x1,
+		                                VAR __q2 = FIND ( "**", __x1, __p2 + 2, BLANK () )
+		                                RETURN
+		                                    IF (
+		                                        ISBLANK ( __q2 ),
+		                                __x1,
+		                                        IF ( __p2 <= 1, "", LEFT ( __x1, __p2 - 1 ) )
+		                                            & "<strong>"
+		                                            & IF ( __q2 - __p2 - 2 <= 0, "", MID ( __x1, __p2 + 2, __q2 - __p2 - 2 ) )
+		                                            & "</strong>"
+		                                            & IF ( LEN ( __x1 ) <= __q2 + 1, "", MID ( __x1, __q2 + 2, LEN ( __x1 ) - __q2 - 1 ) )
+		                                    )
+		                            )
+		                    )
+		                VAR __x3 =
+		                    IF (
+		                        NOT __run,
+		                        __x2,
+		                        VAR __p3 = FIND ( "**", __x2, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __p3 ),
+		                                __x2,
+		                                VAR __q3 = FIND ( "**", __x2, __p3 + 2, BLANK () )
+		                                RETURN
+		                                    IF (
+		                                        ISBLANK ( __q3 ),
+		                                __x2,
+		                                        IF ( __p3 <= 1, "", LEFT ( __x2, __p3 - 1 ) )
+		                                            & "<strong>"
+		                                            & IF ( __q3 - __p3 - 2 <= 0, "", MID ( __x2, __p3 + 2, __q3 - __p3 - 2 ) )
+		                                            & "</strong>"
+		                                            & IF ( LEN ( __x2 ) <= __q3 + 1, "", MID ( __x2, __q3 + 2, LEN ( __x2 ) - __q3 - 1 ) )
+		                                    )
+		                            )
+		                    )
+		                VAR __x4 =
+		                    IF (
+		                        NOT __run,
+		                        __x3,
+		                        VAR __p4 = FIND ( "**", __x3, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __p4 ),
+		                                __x3,
+		                                VAR __q4 = FIND ( "**", __x3, __p4 + 2, BLANK () )
+		                                RETURN
+		                                    IF (
+		                                        ISBLANK ( __q4 ),
+		                                __x3,
+		                                        IF ( __p4 <= 1, "", LEFT ( __x3, __p4 - 1 ) )
+		                                            & "<strong>"
+		                                            & IF ( __q4 - __p4 - 2 <= 0, "", MID ( __x3, __p4 + 2, __q4 - __p4 - 2 ) )
+		                                            & "</strong>"
+		                                            & IF ( LEN ( __x3 ) <= __q4 + 1, "", MID ( __x3, __q4 + 2, LEN ( __x3 ) - __q4 - 1 ) )
+		                                    )
+		                            )
+		                    )
+		                VAR __y1 =
+		                    IF (
+		                        NOT __run,
+		                        __x4,
+		                        VAR __pi = FIND ( "*", __x4, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __pi ),
+		                                __x4,
+		                                IF (
+		                                    MID ( __x4, __pi + 1, 1 ) = "*",
+		                                    __x4,
+		                                    VAR __qi = FIND ( "*", __x4, __pi + 1, BLANK () )
+		                                    RETURN
+		                                        IF (
+		                                            ISBLANK ( __qi ),
+		                                    __x4,
+		                                            IF (
+		                                                MID ( __x4, __qi + 1, 1 ) = "*",
+		                                        __x4,
+		                                                IF ( __pi <= 1, "", LEFT ( __x4, __pi - 1 ) )
+		                                                    & "<em>"
+		                                                    & IF ( __qi - __pi - 1 <= 0, "", MID ( __x4, __pi + 1, __qi - __pi - 1 ) )
+		                                                    & "</em>"
+		                                                    & IF ( LEN ( __x4 ) <= __qi, "", MID ( __x4, __qi + 1, LEN ( __x4 ) - __qi ) )
+		                                            )
+		                                        )
+		                                )
+		                            )
+		                    )
+		                VAR __y2 =
+		                    IF (
+		                        NOT __run,
+		                        __y1,
+		                        VAR __pi2 = FIND ( "*", __y1, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __pi2 ),
+		                                __y1,
+		                                IF (
+		                                    MID ( __y1, __pi2 + 1, 1 ) = "*",
+		                                    __y1,
+		                                    VAR __qi2 = FIND ( "*", __y1, __pi2 + 1, BLANK () )
+		                                    RETURN
+		                                        IF (
+		                                            ISBLANK ( __qi2 ),
+		                                    __y1,
+		                                            IF (
+		                                                MID ( __y1, __qi2 + 1, 1 ) = "*",
+		                                        __y1,
+		                                                IF ( __pi2 <= 1, "", LEFT ( __y1, __pi2 - 1 ) )
+		                                                    & "<em>"
+		                                                    & IF ( __qi2 - __pi2 - 1 <= 0, "", MID ( __y1, __pi2 + 1, __qi2 - __pi2 - 1 ) )
+		                                                    & "</em>"
+		                                                    & IF ( LEN ( __y1 ) <= __qi2, "", MID ( __y1, __qi2 + 1, LEN ( __y1 ) - __qi2 ) )
+		                                            )
+		                                        )
+		                                )
+		                            )
+		                    )
+		                VAR __y3 =
+		                    IF (
+		                        NOT __run,
+		                        __y2,
+		                        VAR __pi3 = FIND ( "*", __y2, 1, BLANK () )
+		                        RETURN
+		                            IF (
+		                                ISBLANK ( __pi3 ),
+		                                __y2,
+		                                IF (
+		                                    MID ( __y2, __pi3 + 1, 1 ) = "*",
+		                                    __y2,
+		                                    VAR __qi3 = FIND ( "*", __y2, __pi3 + 1, BLANK () )
+		                                    RETURN
+		                                        IF (
+		                                            ISBLANK ( __qi3 ),
+		                                    __y2,
+		                                            IF (
+		                                                MID ( __y2, __qi3 + 1, 1 ) = "*",
+		                                        __y2,
+		                                                IF ( __pi3 <= 1, "", LEFT ( __y2, __pi3 - 1 ) )
+		                                                    & "<em>"
+		                                                    & IF ( __qi3 - __pi3 - 1 <= 0, "", MID ( __y2, __pi3 + 1, __qi3 - __pi3 - 1 ) )
+		                                                    & "</em>"
+		                                                    & IF ( LEN ( __y2 ) <= __qi3, "", MID ( __y2, __qi3 + 1, LEN ( __y2 ) - __qi3 ) )
+		                                            )
+		                                        )
+		                                )
+		                            )
+		                    )
+		                VAR __inl = IF ( __run, __y3, "" )
+		                VAR __curIdx = [Idx]
+		                VAR __prevSigIdx =
+		                    MAXX ( FILTER ( __MdWithDepth, [Idx] < __curIdx && NOT [IsEmpty] ), [Idx] )
+		                VAR __prevKind =
+		                    IF ( ISBLANK ( __prevSigIdx ), "", MAXX ( FILTER ( __MdWithDepth, [Idx] = __prevSigIdx ), [Kind] ) )
+		                VAR __nextSigIdx =
+		                    MINX ( FILTER ( __MdWithDepth, [Idx] > __curIdx && NOT [IsEmpty] ), [Idx] )
+		                VAR __nextKind =
+		                    IF ( ISBLANK ( __nextSigIdx ), "", MAXX ( FILTER ( __MdWithDepth, [Idx] = __nextSigIdx ), [Kind] ) )
+		                VAR __ulOpen =
+		                    [Kind] = "U"
+		                        && OR ( ISBLANK ( __prevSigIdx ), __prevKind <> "U" )
+		                VAR __ulClose =
+		                    [Kind] = "U"
+		                        && OR ( ISBLANK ( __nextSigIdx ), __nextKind <> "U" )
+		                VAR __depth = IF ( [Kind] = "U", [ListDepth], 0 )
+		                VAR __nextUD =
+		                    IF (
+		                        OR ( ISBLANK ( __nextSigIdx ), __nextKind <> "U" ),
+		                        BLANK (),
+		                        MAXX ( FILTER ( __MdWithDepth, [Idx] = __nextSigIdx ), [ListDepth] )
+		                    )
+		                VAR __ulSuffix =
+		                    IF (
+		                        [Kind] <> "U",
+		                        "",
+		                        IF (
+		                            ISBLANK ( __nextUD ),
+		                            "</li>"
+		                                & IF (
+		                                    __depth > 0,
+		                                    CONCATENATEX ( GENERATESERIES ( 1, __depth, 1 ), "</ul></li>", "" ),
+		                                    ""
+		                                ),
+		                            IF (
+		                                __nextUD > __depth,
+		                                " <ul>",
+		                                IF (
+		                                    __nextUD = __depth,
+		                                    "</li>",
+		                                    "</li>"
+		                                        & CONCATENATEX (
+		                                            GENERATESERIES ( 1, __depth - __nextUD, 1 ),
+		                                            "</ul></li>",
+		                                            ""
+		                                        )
+		                                )
+		                            )
+		                        )
+		                    )
+		                RETURN
+		                    SWITCH (
+		                        TRUE (),
+		                        [IsEmpty], "",
+		                        [Kind] = "R", "<hr />",
+		                        [Kind] = "H",
+		                            "<h"
+		                                & FORMAT ( __sph - 1, "0" )
+		                                & ">"
+		                                & __inl
+		                                & "</h"
+		                                & FORMAT ( __sph - 1, "0" )
+		                                & ">",
+		                        [Kind] = "U",
+		                            IF ( __ulOpen, "<ul>", "" )
+		                                & "<li>"
+		                                & __inl
+		                                & __ulSuffix
+		                                & IF ( __ulClose, "</ul>", "" ),
+		                        [Kind] = "P" && NOT [IsEmpty] && [Idx] = __first, "<p>" & __inl & "</p>",
+		                        ""
+		                    ),
+		                "",
+		                [Idx],
+		                ASC
+		            )
+		        RETURN __Html
 		    )
 
-		RETURN __Html
-```
+		    annotation DAXLIB_PackageId = Fi.Convert
 
-	annotation DAXLIB_PackageId = Fi.Convert
-
-	annotation DAXLIB_PackageVersion = 0.1.0
+		    annotation DAXLIB_PackageVersion = 0.1.0
