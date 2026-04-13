@@ -7,6 +7,7 @@
 /// - This is not a complete CommonMark implementation (no blockquotes, tables, setext headings,
 ///   tight/loose list nuance, link reference definitions, nested lists, thematic breaks, etc.).
 /// - Inline parsing is intentionally simple and may not match all edge cases from the spec.
+/// - Partial link paths are not supported ([link](/res/img.png))
 function 'Fi.Convert.MDtoHTML' = ```
 		(
 		    // Markdown input
@@ -18,16 +19,24 @@ function 'Fi.Convert.MDtoHTML' = ```
 		    // Normalize line breaks to LF
 		    SUBSTITUTE( SUBSTITUTE( markdown, CR & LF, LF ), CR, LF )
 
+		// Pragmatic: flatten blockquote-wrapped lines (`> `) since blockquotes
+		// are not fully implemented; this also allows inline constructs (like links)
+		// to span across wrapped `> ` lines.
+		VAR __Text1 = SUBSTITUTE( __Text0, LF & "> ", " " )
+
 		// Split into lines using PATH* (| delimiter)
-		VAR __Path = SUBSTITUTE( __Text0, LF, "|" )
+		VAR __Path = SUBSTITUTE( __Text1, LF, "|" )
 		VAR __LineCount =
 		    VAR n = PATHLENGTH( __Path )
-		    RETURN IF( __Text0 = BLANK(), 0, n )
+		    RETURN IF( __Text1 = BLANK(), 0, n )
 
 		VAR __Lines =
 		    ADDCOLUMNS(
 		        GENERATESERIES( 1, __LineCount, 1 ),
-		        "LineRaw", PATHITEM( __Path, [Value], TEXT )
+		        "LineRaw",
+		            VAR __L0 = PATHITEM( __Path, [Value], TEXT )
+		            VAR __T = TRIM( __L0 )
+		            RETURN IF( LEFT( __T, 2 ) = "> ", MID( __T, 3, LEN( __T ) - 2 ), __L0 )
 		    )
 
 		VAR __Lines2 =
@@ -171,17 +180,94 @@ function 'Fi.Convert.MDtoHTML' = ```
 		                    )
 		                )
 
+		        // Inline: links [text](href) outside <code> spans (pragmatic)
+		        VAR __InlineLinks =
+		            VAR __PosCodeOpen = SEARCH( "<code>", __InlineCode, 1, 0 )
+		            RETURN
+		                IF(
+		                    __PosCodeOpen = 0,
+		                    // No code span: linkify whole line once
+		                    VAR __S = __InlineCode
+		                    VAR __PosOpen = SEARCH( "[", __S, 1, 0 )
+		                    VAR __PosMid = IF( __PosOpen = 0, 0, SEARCH( "](", __S, __PosOpen + 1, 0 ) )
+		                    VAR __PosClose = IF( __PosMid = 0, 0, SEARCH( ")", __S, __PosMid + 2, 0 ) )
+		                    RETURN
+		                        IF(
+		                            __PosOpen = 0 || __PosMid = 0 || __PosClose = 0,
+		                            __S,
+		                            VAR __Before = LEFT( __S, __PosOpen - 1 )
+		                            VAR __Txt = MID( __S, __PosOpen + 1, __PosMid - __PosOpen - 1 )
+		                            VAR __Href = MID( __S, __PosMid + 2, __PosClose - __PosMid - 2 )
+		                            VAR __After = MID( __S, __PosClose + 1, LEN( __S ) - __PosClose )
+		                            RETURN __Before & "<a href=""" & __Href & """>" & __Txt & "</a>" & __After
+		                        ),
+		                    // Has a code span: linkify before and after the first code span
+		                    VAR __Before0 = LEFT( __InlineCode, __PosCodeOpen - 1 )
+		                    VAR __Rest0 = MID( __InlineCode, __PosCodeOpen + 6, LEN( __InlineCode ) - ( __PosCodeOpen + 5 ) )
+		                    VAR __PosCodeClose = SEARCH( "</code>", __Rest0, 1, 0 )
+		                    RETURN
+		                        IF(
+		                            __PosCodeClose = 0,
+		                            VAR __S = __Before0
+		                            VAR __PosOpen = SEARCH( "[", __S, 1, 0 )
+		                            VAR __PosMid = IF( __PosOpen = 0, 0, SEARCH( "](", __S, __PosOpen + 1, 0 ) )
+		                            VAR __PosClose = IF( __PosMid = 0, 0, SEARCH( ")", __S, __PosMid + 2, 0 ) )
+		                            VAR __Before1 =
+		                                IF(
+		                                    __PosOpen = 0 || __PosMid = 0 || __PosClose = 0,
+		                                    __S,
+		                                    VAR __Before = LEFT( __S, __PosOpen - 1 )
+		                                    VAR __Txt = MID( __S, __PosOpen + 1, __PosMid - __PosOpen - 1 )
+		                                    VAR __Href = MID( __S, __PosMid + 2, __PosClose - __PosMid - 2 )
+		                                    VAR __After = MID( __S, __PosClose + 1, LEN( __S ) - __PosClose )
+		                                    RETURN __Before & "<a href=""" & __Href & """>" & __Txt & "</a>" & __After
+		                                )
+		                            RETURN __Before1 & "<code>" & __Rest0,
+		                            VAR __CodeInside = LEFT( __Rest0, __PosCodeClose - 1 )
+		                            VAR __After0 = MID( __Rest0, __PosCodeClose + 7, LEN( __Rest0 ) - ( __PosCodeClose + 6 ) )
+		                            VAR __S = __Before0
+		                            VAR __PosOpen = SEARCH( "[", __S, 1, 0 )
+		                            VAR __PosMid = IF( __PosOpen = 0, 0, SEARCH( "](", __S, __PosOpen + 1, 0 ) )
+		                            VAR __PosClose = IF( __PosMid = 0, 0, SEARCH( ")", __S, __PosMid + 2, 0 ) )
+		                            VAR __Before1 =
+		                                IF(
+		                                    __PosOpen = 0 || __PosMid = 0 || __PosClose = 0,
+		                                    __S,
+		                                    VAR __Before = LEFT( __S, __PosOpen - 1 )
+		                                    VAR __Txt = MID( __S, __PosOpen + 1, __PosMid - __PosOpen - 1 )
+		                                    VAR __Href = MID( __S, __PosMid + 2, __PosClose - __PosMid - 2 )
+		                                    VAR __After = MID( __S, __PosClose + 1, LEN( __S ) - __PosClose )
+		                                    RETURN __Before & "<a href=""" & __Href & """>" & __Txt & "</a>" & __After
+		                                )
+		                            VAR __S2 = __After0
+		                            VAR __PosOpen2 = SEARCH( "[", __S2, 1, 0 )
+		                            VAR __PosMid2 = IF( __PosOpen2 = 0, 0, SEARCH( "](", __S2, __PosOpen2 + 1, 0 ) )
+		                            VAR __PosClose2 = IF( __PosMid2 = 0, 0, SEARCH( ")", __S2, __PosMid2 + 2, 0 ) )
+		                            VAR __After1 =
+		                                IF(
+		                                    __PosOpen2 = 0 || __PosMid2 = 0 || __PosClose2 = 0,
+		                                    __S2,
+		                                    VAR __Before = LEFT( __S2, __PosOpen2 - 1 )
+		                                    VAR __Txt = MID( __S2, __PosOpen2 + 1, __PosMid2 - __PosOpen2 - 1 )
+		                                    VAR __Href = MID( __S2, __PosMid2 + 2, __PosClose2 - __PosMid2 - 2 )
+		                                    VAR __After = MID( __S2, __PosClose2 + 1, LEN( __S2 ) - __PosClose2 )
+		                                    RETURN __Before & "<a href=""" & __Href & """>" & __Txt & "</a>" & __After
+		                                )
+		                            RETURN __Before1 & "<code>" & __CodeInside & "</code>" & __After1
+		                        )
+		                )
+
 		        // Inline: strong (** .. **) and emphasis (* .. *) outside code blocks (simple toggles)
 		        VAR __InlineStrong =
 		            VAR __Shield = UNICHAR( 57345 )
-		            VAR __Safe = SUBSTITUTE( __InlineCode, "|", __Shield )
+		            VAR __Safe = SUBSTITUTE( __InlineLinks, "|", __Shield )
 		            VAR __Pth = SUBSTITUTE( __Safe, "**", "|" )
 		            VAR __Parts = PATHLENGTH( __Pth )
 		            VAR __Ok = MOD( __Parts - 1, 2 ) = 0
 		            RETURN
 		                IF(
 		                    NOT __Ok,
-		                    __InlineCode,
+		                    __InlineLinks,
 		                    CONCATENATEX(
 		                        GENERATESERIES( 1, __Parts, 1 ),
 		                        VAR __K = [Value]
@@ -258,7 +344,56 @@ function 'Fi.Convert.MDtoHTML' = ```
 		                NOT [InCodeBefore] && [HeadingLevel] > 0,
 		                VAR __Lvl = [HeadingLevel]
 		                VAR __Content = MID( __LineRaw, __Lvl + 2, LEN( __LineRaw ) - ( __Lvl + 1 ) )
-		                RETURN "<h" & __Lvl & ">" & __Content & "</h" & __Lvl & ">" & LF,
+		                VAR __Slug0 = LOWER( TRIM( __Content ) )
+		                VAR __Slug1 =
+		                    SUBSTITUTE(
+		                        SUBSTITUTE(
+		                            SUBSTITUTE(
+		                                SUBSTITUTE(
+		                                    SUBSTITUTE(
+		                                        SUBSTITUTE(
+		                                            SUBSTITUTE(
+		                                                SUBSTITUTE(
+		                                                    SUBSTITUTE(
+		                                                        SUBSTITUTE(
+		                                                            SUBSTITUTE(
+		                                                                SUBSTITUTE( __Slug0, ".", "" ),
+		                                                                ",", ""
+		                                                            ),
+		                                                            ":", ""
+		                                                        ),
+		                                                        ";", ""
+		                                                    ),
+		                                                    "!", ""
+		                                                ),
+		                                                "?", ""
+		                                            ),
+		                                            """", ""
+		                                        ),
+		                                        "'", ""
+		                                    ),
+		                                    "(", ""
+		                                ),
+		                                ")", ""
+		                            ),
+		                            "[", ""
+		                        ),
+		                        "]", ""
+		                    )
+		                VAR __Slug2 = SUBSTITUTE( __Slug1, " ", "-" )
+		                VAR __Slug3 =
+		                    SUBSTITUTE(
+		                        SUBSTITUTE(
+		                            SUBSTITUTE(
+		                                SUBSTITUTE( __Slug2, "--", "-" ),
+		                                "--", "-"
+		                            ),
+		                            "--", "-"
+		                        ),
+		                        "--", "-"
+		                    )
+		                VAR __Slug = __Slug3
+		                RETURN "<h" & __Lvl & " id=""" & __Slug & """>" & __Content & "</h" & __Lvl & ">" & LF,
 		                BLANK()
 		            )
 
@@ -306,4 +441,3 @@ function 'Fi.Convert.MDtoHTML' = ```
 	annotation DAXLIB_PackageId = Fi.Convert
 
 	annotation DAXLIB_PackageVersion = 0.1.0
-
