@@ -1,0 +1,309 @@
+/// Converts Markdown to HTML (CommonMark 0.31.2 core).
+/// Supported (pragmatic subset): fenced code blocks (```), ATX headings (#..######),
+/// unordered lists (-, *, +), paragraphs, blank-line separation, and basic inline
+/// formatting: code spans (`code`), strong (**bold**), emphasis (*italic*).
+///
+/// Notes / limitations:
+/// - This is not a complete CommonMark implementation (no blockquotes, tables, setext headings,
+///   tight/loose list nuance, link reference definitions, nested lists, thematic breaks, etc.).
+/// - Inline parsing is intentionally simple and may not match all edge cases from the spec.
+function 'Fi.Convert.MDtoHTML' = ```
+		(
+		    // Markdown input
+		    markdown: STRING
+		) =>
+		VAR LF = UNICHAR( 10 )
+		VAR CR = UNICHAR( 13 )
+		VAR __Text0 =
+		    // Normalize line breaks to LF
+		    SUBSTITUTE( SUBSTITUTE( markdown, CR & LF, LF ), CR, LF )
+
+		// Split into lines using PATH* (| delimiter)
+		VAR __Path = SUBSTITUTE( __Text0, LF, "|" )
+		VAR __LineCount =
+		    VAR n = PATHLENGTH( __Path )
+		    RETURN IF( __Text0 = BLANK(), 0, n )
+
+		VAR __Lines =
+		    ADDCOLUMNS(
+		        GENERATESERIES( 1, __LineCount, 1 ),
+		        "LineRaw", PATHITEM( __Path, [Value], TEXT )
+		    )
+
+		VAR __Lines2 =
+		    ADDCOLUMNS(
+		        __Lines,
+		        "LineTrim", TRIM( [LineRaw] ),
+		        "IsBlank", LEN( TRIM( [LineRaw] ) ) = 0,
+		        "IsFence", LEFT( TRIM( [LineRaw] ), 3 ) = "```",
+		        "IsUL",
+		            VAR t = TRIM( [LineRaw] )
+		            RETURN
+		                ( LEFT( t, 2 ) = "- " )
+		                    || ( LEFT( t, 2 ) = "* " )
+		                    || ( LEFT( t, 2 ) = "+ " ),
+		        "HeadingLevel",
+		            VAR t = [LineRaw]
+		            RETURN
+		                SWITCH(
+		                    TRUE(),
+		                    LEFT( t, 7 ) = "###### ", 6,
+		                    LEFT( t, 6 ) = "##### ",  5,
+		                    LEFT( t, 5 ) = "#### ",   4,
+		                    LEFT( t, 4 ) = "### ",    3,
+		                    LEFT( t, 3 ) = "## ",     2,
+		                    LEFT( t, 2 ) = "# ",      1,
+		                    0
+		                ),
+		        "FenceCountBefore",
+		            VAR i = [Value]
+		            RETURN
+		                SUMX(
+		                    FILTER( __Lines, [Value] < i ),
+		                    VAR t2 = TRIM( [LineRaw] )
+		                    RETURN IF( LEFT( t2, 3 ) = "```", 1, 0 )
+		                )
+		    )
+
+		VAR __Lines3 =
+		    ADDCOLUMNS(
+		        __Lines2,
+		        "InCodeBefore", MOD( [FenceCountBefore], 2 ) = 1,
+		        "IsFenceStart", ( MOD( [FenceCountBefore], 2 ) = 0 ) && [IsFence],
+		        "IsFenceEnd",   ( MOD( [FenceCountBefore], 2 ) = 1 ) && [IsFence]
+		    )
+
+		// Build HTML by rendering each line with boundary-aware wrappers.
+		VAR __Html =
+		    CONCATENATEX(
+		        __Lines3,
+		        VAR __I = [Value]
+		        VAR __LineRaw = [LineRaw]
+		        VAR __LineTrim = [LineTrim]
+
+		        VAR __PrevIsUL =
+		            VAR __P = __I - 1
+		            RETURN
+		                IF(
+		                    __P < 1,
+		                    FALSE(),
+		                    MAXX( FILTER( __Lines3, [Value] = __P ), IF( [IsUL], 1, 0 ) ) = 1
+		                )
+		        VAR __NextIsUL =
+		            VAR __N = __I + 1
+		            RETURN
+		                IF(
+		                    __N > __LineCount,
+		                    FALSE(),
+		                    MAXX( FILTER( __Lines3, [Value] = __N ), IF( [IsUL], 1, 0 ) ) = 1
+		                )
+
+		        VAR __PrevIsParaLine =
+		            VAR __P = __I - 1
+		            RETURN
+		                IF(
+		                    __P < 1,
+		                    FALSE(),
+		                    MAXX(
+		                        FILTER( __Lines3, [Value] = __P ),
+		                        IF(
+		                            NOT [IsBlank]
+		                                && NOT [IsUL]
+		                                && [HeadingLevel] = 0
+		                                && NOT [IsFence]
+		                                && NOT [InCodeBefore],
+		                            1,
+		                            0
+		                        )
+		                    )
+		                        = 1
+		                )
+		        VAR __NextIsParaLine =
+		            VAR __N = __I + 1
+		            RETURN
+		                IF(
+		                    __N > __LineCount,
+		                    FALSE(),
+		                    MAXX(
+		                        FILTER( __Lines3, [Value] = __N ),
+		                        IF(
+		                            NOT [IsBlank]
+		                                && NOT [IsUL]
+		                                && [HeadingLevel] = 0
+		                                && NOT [IsFence]
+		                                && NOT [InCodeBefore],
+		                            1,
+		                            0
+		                        )
+		                    )
+		                        = 1
+		                )
+
+		        // HTML escaping (basic)
+		        VAR __Pch = UNICHAR( 57344 )
+		        VAR __Esc0 =
+		            VAR __T1 = SUBSTITUTE( __LineRaw, "&", __Pch )
+		            VAR __T2 = SUBSTITUTE( __T1, "<", "&lt;" )
+		            VAR __T3 = SUBSTITUTE( __T2, ">", "&gt;" )
+		            VAR __T4 = SUBSTITUTE( __T3, """", "&quot;" )
+		            RETURN SUBSTITUTE( __T4, __Pch, "&amp;" )
+
+		        // Inline: code spans using backticks (simple, single-line)
+		        // PATH* only splits on '|', so we temporarily shield existing '|' characters.
+		        VAR __InlineCode =
+		            VAR __Shield = UNICHAR( 57345 )
+		            VAR __Safe = SUBSTITUTE( __Esc0, "|", __Shield )
+		            VAR __Pth = SUBSTITUTE( __Safe, "`", "|" )
+		            VAR __Parts = PATHLENGTH( __Pth )
+		            RETURN
+		                IF(
+		                    __Parts = 1,
+		                    __Esc0,
+		                    CONCATENATEX(
+		                        GENERATESERIES( 1, __Parts, 1 ),
+		                        VAR __K = [Value]
+		                        VAR __Seg0 = PATHITEM( __Pth, __K, TEXT )
+		                        VAR __Seg = SUBSTITUTE( __Seg0, __Shield, "|" )
+		                        RETURN IF( MOD( __K, 2 ) = 0, "<code>" & __Seg & "</code>", __Seg ),
+		                        "",
+		                        [Value],
+		                        ASC
+		                    )
+		                )
+
+		        // Inline: strong (** .. **) and emphasis (* .. *) outside code blocks (simple toggles)
+		        VAR __InlineStrong =
+		            VAR __Shield = UNICHAR( 57345 )
+		            VAR __Safe = SUBSTITUTE( __InlineCode, "|", __Shield )
+		            VAR __Pth = SUBSTITUTE( __Safe, "**", "|" )
+		            VAR __Parts = PATHLENGTH( __Pth )
+		            VAR __Ok = MOD( __Parts - 1, 2 ) = 0
+		            RETURN
+		                IF(
+		                    NOT __Ok,
+		                    __InlineCode,
+		                    CONCATENATEX(
+		                        GENERATESERIES( 1, __Parts, 1 ),
+		                        VAR __K = [Value]
+		                        VAR __Seg0 = PATHITEM( __Pth, __K, TEXT )
+		                        VAR __Seg = SUBSTITUTE( __Seg0, __Shield, "|" )
+		                        RETURN IF( MOD( __K, 2 ) = 0, "<strong>" & __Seg & "</strong>", __Seg ),
+		                        "",
+		                        [Value],
+		                        ASC
+		                    )
+		                )
+
+		        VAR __InlineEm =
+		            VAR __Shield = UNICHAR( 57345 )
+		            VAR __Safe = SUBSTITUTE( __InlineStrong, "|", __Shield )
+		            VAR __Pth = SUBSTITUTE( __Safe, "*", "|" )
+		            VAR __Parts = PATHLENGTH( __Pth )
+		            VAR __Ok = MOD( __Parts - 1, 2 ) = 0
+		            RETURN
+		                IF(
+		                    NOT __Ok,
+		                    __InlineStrong,
+		                    CONCATENATEX(
+		                        GENERATESERIES( 1, __Parts, 1 ),
+		                        VAR __K = [Value]
+		                        VAR __Seg0 = PATHITEM( __Pth, __K, TEXT )
+		                        VAR __Seg = SUBSTITUTE( __Seg0, __Shield, "|" )
+		                        RETURN IF( MOD( __K, 2 ) = 0, "<em>" & __Seg & "</em>", __Seg ),
+		                        "",
+		                        [Value],
+		                        ASC
+		                    )
+		                )
+
+		        VAR __RenderedInline = __InlineEm
+
+		        VAR __OpenUL = IF( [IsUL] && NOT __PrevIsUL && NOT [InCodeBefore], "<ul>" & LF, "" )
+		        VAR __CloseUL = IF( [IsUL] && NOT __NextIsUL && NOT [InCodeBefore], LF & "</ul>" & LF, "" )
+
+		        VAR __OpenP =
+		            IF(
+		                NOT [InCodeBefore]
+		                    && NOT [IsFence]
+		                    && NOT [IsBlank]
+		                    && NOT [IsUL]
+		                    && [HeadingLevel] = 0
+		                    && NOT __PrevIsParaLine,
+		                "<p>",
+		                ""
+		            )
+		        VAR __CloseP =
+		            IF(
+		                NOT [InCodeBefore]
+		                    && NOT [IsFence]
+		                    && NOT [IsBlank]
+		                    && NOT [IsUL]
+		                    && [HeadingLevel] = 0
+		                    && NOT __NextIsParaLine,
+		                "</p>" & LF,
+		                ""
+		            )
+
+		        VAR __Li =
+		            IF(
+		                [IsUL] && NOT [InCodeBefore],
+		                VAR __T = __LineTrim
+		                VAR __Content = MID( __T, 3, LEN( __T ) - 2 )
+		                RETURN "<li>" & __Content & "</li>",
+		                BLANK()
+		            )
+
+		        VAR __Heading =
+		            IF(
+		                NOT [InCodeBefore] && [HeadingLevel] > 0,
+		                VAR __Lvl = [HeadingLevel]
+		                VAR __Content = MID( __LineRaw, __Lvl + 2, LEN( __LineRaw ) - ( __Lvl + 1 ) )
+		                RETURN "<h" & __Lvl & ">" & __Content & "</h" & __Lvl & ">" & LF,
+		                BLANK()
+		            )
+
+		        VAR __CodeFence =
+		            IF(
+		                [IsFenceStart],
+		                "<pre><code>" & LF,
+		                IF( [IsFenceEnd], "</code></pre>" & LF, BLANK() )
+		            )
+
+		        VAR __CodeLine =
+		            IF(
+		                [InCodeBefore] && NOT [IsFence],
+		                __Esc0 & LF,
+		                BLANK()
+		            )
+
+		        VAR __ParaLine =
+		            IF(
+		                NOT [InCodeBefore]
+		                    && NOT [IsFence]
+		                    && NOT [IsBlank]
+		                    && NOT [IsUL]
+		                    && [HeadingLevel] = 0,
+		                __OpenP & __RenderedInline & __CloseP,
+		                BLANK()
+		            )
+
+		        RETURN
+		            COALESCE( __OpenUL, "" )
+		                & COALESCE( __CodeFence, "" )
+		                & COALESCE( __CodeLine, "" )
+		                & COALESCE( __Heading, "" )
+		                & COALESCE( __Li, "" )
+		                & COALESCE( __ParaLine, "" )
+		                & COALESCE( __CloseUL, "" ),
+		        "",
+		        [Value],
+		        ASC
+		    )
+
+		RETURN __Html
+```
+
+	annotation DAXLIB_PackageId = Fi.Convert
+
+	annotation DAXLIB_PackageVersion = 0.1.0
+
